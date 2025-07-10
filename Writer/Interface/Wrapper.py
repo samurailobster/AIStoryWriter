@@ -8,6 +8,7 @@ import random
 import importlib
 import subprocess
 import sys
+import re
 from urllib.parse import parse_qs, urlparse
 
 dotenv.load_dotenv()
@@ -149,10 +150,15 @@ class Interface:
             del _Messages[-1] # Remove failed attempt
             NewMsg = self.ChatAndStreamResponse(_Logger, _Messages, _Model, random.randint(0, 99999), _Format)
 
+        self.RemoveThinkTagFromAssistantMessages(NewMsg)
+
         return NewMsg
 
-
-
+    def RemoveThinkTagFromAssistantMessages(self, messages):
+        for msg in messages:
+            if msg.get('role') == 'assistant' and 'content' in msg:
+                msg['content'] = re.sub(r'<think>.*?</think>', '', msg['content'], flags=re.DOTALL)
+    
     def SafeGenerateJSON(self, _Logger, _Messages, _Model:str, _SeedOverride:int = -1, _RequiredAttribs:list = []):
 
         while True:
