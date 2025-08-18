@@ -13,7 +13,6 @@ from urllib.parse import parse_qs, urlparse
 
 dotenv.load_dotenv()
 
-
 class Interface:
 
     def __init__(
@@ -98,7 +97,30 @@ class Interface:
                     )
 
                 elif Provider == "openai":
-                    raise NotImplementedError("OpenAI API not supported")
+                    # Validate OpenAI API Key
+                    if (
+                        not "OPENAI_API_KEY" in os.environ
+                        or os.environ["OPENAI_API_KEY"] == ""
+                    ):
+                        raise Exception(
+                            "OPENAI_API_KEY not found in environment variables. Add dummy if using local models."
+                        )
+                    self.ensure_package_is_installed("openai")
+                    import openai
+
+                    if ModelHost and not "://" in ModelHost:
+                        raise ValueError(
+                            f"Invalid Model Host URL {ModelHost}. Make sure to include the protocol (http/https)"
+                        )
+
+                    self.Clients[Model] = openai.OpenAI(
+                        api_key=os.environ["OPENAI_API_KEY"],
+                        base_url=(
+                            "http://openai.com:1234" # Add OpenAI compatible endpoint here
+                            if ModelHost is None
+                            else ModelHost
+                        ),
+                    )
 
                 elif Provider == "openrouter":
                     if (
@@ -133,6 +155,7 @@ class Interface:
         """
         This function guarantees that the output will not be whitespace.
         """
+        MaxAttempts = 10
 
         # Strip Empty Messages
         for i in range(len(_Messages) - 1, 0, -1):
@@ -142,8 +165,12 @@ class Interface:
         NewMsg = self.ChatAndStreamResponse(_Logger, _Messages, _Model, _SeedOverride, _Format)
 
         while (self.GetLastMessageText(NewMsg).strip() == "") or (len(self.GetLastMessageText(NewMsg).split(" ")) < _MinWordCount):
+            if MaxAttempts <= 0:
+                 _Logger.Log("SafeGenerateText: Generation Failed Due To Empty (Whitespace) Response, Maximum number of attempts reached!", 7)
+                 break
             if self.GetLastMessageText(NewMsg).strip() == "":
                 _Logger.Log("SafeGenerateText: Generation Failed Due To Empty (Whitespace) Response, Reattempting Output", 7)
+                MaxAttempts -= 1
             elif (len(self.GetLastMessageText(NewMsg).split(" ")) < _MinWordCount):
                 _Logger.Log(f"SafeGenerateText: Generation Failed Due To Short Response ({len(self.GetLastMessageText(NewMsg).split(' '))}, min is {_MinWordCount}), Reattempting Output", 7)
 
@@ -160,27 +187,20 @@ class Interface:
                 msg['content'] = re.sub(r'<think>.*?</think>', '', msg['content'], flags=re.DOTALL)
     
     def SafeGenerateJSON(self, _Logger, _Messages, _Model:str, _SeedOverride:int = -1, _RequiredAttribs:list = []):
-
         while True:
             Response = self.SafeGenerateText(_Logger, _Messages, _Model, _SeedOverride, _Format = "JSON")
             try:
-
                 # Check that it returned valid json
                 JSONResponse = json.loads(self.GetLastMessageText(Response))
-
                 # Now ensure it has the right attributes
                 for _Attrib in _RequiredAttribs:
                     JSONResponse[_Attrib]
-
                 # Now return the json
                 return Response, JSONResponse
-
             except Exception as e:
                 _Logger.Log(f"JSON Error during parsing: {e}", 7)
                 del _Messages[-1] # Remove failed attempt
                 Response = self.ChatAndStreamResponse(_Logger, _Messages, _Model, random.randint(0, 99999), _Format = "JSON")
-
-
 
     def ChatAndStreamResponse(
         self,
@@ -353,7 +373,30 @@ class Interface:
                     m["role"] = "assistant"
 
         elif Provider == "openai":
-            raise NotImplementedError("OpenAI API not supported")
+            MaxRetries = 3
+            while True:
+                try:
+                    Stream = self.Clients[_Model].chat.completions.create(
+                        messages=_Messages,
+                        stream=True,
+                        model=ProviderModel,
+                    )
+                    _Messages.append(self.StreamResponse(Stream, Provider))
+                    break
+                except Exception as e:
+                    if MaxRetries > 0:
+                        _Logger.Log(
+                            f"Exception During Generation '{e}', {MaxRetries} Retries Remaining",
+                            7,
+                        )
+                        MaxRetries -= 1
+                    else:
+                        _Logger.Log(
+                            f"Max Retries Exceeded During Generation, Aborting!", 7
+                        )
+                        raise Exception(
+                            "Generation Failed, Max Retires Exceeded, Aborting"
+                        )
 
         elif Provider == "openrouter":
 
@@ -395,7 +438,7 @@ class Interface:
             4,
         )
         # Check if the response is empty and attempt regeneration if necessary
-        if _Messages[-1]["content"].strip() == "":
+        if _Messages[-1]["content"].isspace():
             _Logger.Log("Model Returned Only Whitespace, Attempting Regeneration", 6)
             _Messages.append(
                 self.BuildUserQuery(
@@ -418,6 +461,8 @@ class Interface:
                 ChunkText = chunk["message"]["content"]
             elif _Provider == "google":
                 ChunkText = chunk.text
+            elif _Provider == "openai":
+                ChunkText = chunk.choices[0].delta.content or ""
             else:
                 raise ValueError(f"Unsupported provider: {_Provider}")
 
@@ -448,23 +493,25 @@ class Interface:
             print(parsed)
             Provider = parsed.scheme
 
-            if "@" in parsed.netloc:
-                Model, Host = parsed.netloc.split("@")
+            FullPath = parsed.netloc + parsed.path
+
+            if "@" in FullPath:
+                Model, Host = FullPath.split("@")
 
             elif Provider == "openrouter":
-                Model = f"{parsed.netloc}{parsed.path}"
+                Model = FullPath
                 Host = None
 
             elif "ollama" in _Model:
                 if "@" in parsed.path:
-                    Model = parsed.netloc + parsed.path.split("@")[0]
-                    Host = parsed.path.split("@")[1]
+                    Model = FullPath.split("@")[0]
+                    Host = FullPath.split("@")[1]
                 else:
-                    Model = parsed.netloc
+                    Model = FullPath
                     Host = "localhost:11434"
 
             else:
-                Model = parsed.netloc
+                Model = FullPath
                 Host = None
             QueryParams = parse_qs(parsed.query)
 
